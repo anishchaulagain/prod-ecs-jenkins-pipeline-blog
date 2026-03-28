@@ -1,0 +1,157 @@
+pipeline {
+    agent { label 'prod-jenkins-node-1' }
+
+    environment {
+        ENV_FILE = credentials('backend-env')
+    }
+    
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 20, unit: 'MINUTES')
+    }
+    
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'tr -d "\\r" < "$ENV_FILE" > custom_env.sh'
+
+                script {
+                    env.JENKINS_IMAGE_NAME = sh(script: "bash -c 'source custom_env.sh 2>/dev/null; echo \${JENKINS_IMAGE_NAME:-node-deploy}'", returnStdout: true).trim()
+                    env.JENKINS_CONTAINER_NAME = sh(script: "bash -c 'source custom_env.sh 2>/dev/null; echo \${JENKINS_CONTAINER_NAME:-express-api}'", returnStdout: true).trim()
+                    env.JENKINS_PORT = sh(script: "bash -c 'source custom_env.sh 2>/dev/null; echo \${JENKINS_PORT:-8000}'", returnStdout: true).trim()
+                    env.ECR_REPO = sh(script: "bash -c 'source custom_env.sh; echo \${ECR_REPO}'", returnStdout: true).trim()
+                    env.ECS_CLUSTER = sh(script: "bash -c 'source custom_env.sh; echo \${ECS_CLUSTER}'", returnStdout: true).trim()
+                    env.ECS_SERVICE = sh(script: "bash -c 'source custom_env.sh; echo \${ECS_SERVICE}'", returnStdout: true).trim()
+                    env.AWS_ACCOUNT_ID = sh(script: "bash -c 'source custom_env.sh; echo \${AWS_ACCOUNT_ID}'", returnStdout: true).trim()
+                    env.AWS_REGION = sh(script: "bash -c 'source custom_env.sh; echo \${AWS_REGION}'", returnStdout: true).trim()
+
+                    echo "✅ Env loaded"
+                }
+
+                sh 'rm -f custom_env.sh'
+            }
+        }
+
+        // 🧪 (Optional but HIGHLY recommended)
+       stage('Test') {
+    steps {
+        sh '''
+        export NVM_DIR="/home/ubuntu/.nvm"
+        . "$NVM_DIR/nvm.sh"
+
+        nvm use 18
+
+        node -v
+        npm -v
+
+        if [ -f package.json ]; then
+            npm ci
+
+            if npm run | grep -q "test"; then
+                npm test
+            else
+                echo "⚠️ No test script found, skipping..."
+            fi
+        fi
+        '''
+    }
+}
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def commit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    env.IMAGE_TAG = "${commit}-${env.BUILD_NUMBER}"
+                    env.IMAGE_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
+
+                    sh """
+                    docker build -t ${ECR_REPO}:${IMAGE_TAG} .
+                    docker tag ${ECR_REPO}:${IMAGE_TAG} ${IMAGE_URI}
+                    """
+                }
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                retry(3) {
+                    sh """
+                    aws ecr get-login-password \
+                    --region ${AWS_REGION} \
+                    | docker login \
+                    --username AWS \
+                    --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    """
+                }
+            }
+        }
+
+        stage('Push Image to ECR') {
+            steps {
+                retry(3) {
+                    sh "docker push ${IMAGE_URI}"
+                }
+            }
+        }
+
+        // 🔥 OPTIONAL: Enable if you want manual control
+        // stage('Approval') {
+        //     steps {
+        //         input message: "Deploy to production?"
+        //     }
+        // }
+
+        stage('Deploy to ECS') {
+            steps {
+                script {
+                    retry(2) {
+                        sh """
+                        aws ecs update-service \
+                            --cluster ${ECS_CLUSTER} \
+                            --service ${ECS_SERVICE} \
+                            --force-new-deployment \
+                            --region ${AWS_REGION}
+                        """
+                    }
+                }
+            }
+        }
+
+        // 🩺 NEW: Health Check
+        // stage('Health Check') {
+        //     steps {
+        //         script {
+        //             retry(5) {
+        //                 sh """
+        //                 echo "Checking service health..."
+        //                 sleep 10
+        //                 curl -f http://your-domain.com${JENKINS_HEALTH_ENDPOINT}
+        //                 """
+        //             }
+        //         }
+        //     }
+        // }
+    }
+
+    post {
+
+        success {
+            echo "✅ Deployment successful: ${IMAGE_TAG}"
+        }
+
+        failure {
+            echo "❌ Deployment failed"
+
+            // 🔥 LIGHT ROLLBACK IDEA (manual/simple)
+            echo "👉 You can rollback using previous image tag in ECS if needed"
+        }
+
+        always {
+            cleanWs()
+        }
+    }
+}
