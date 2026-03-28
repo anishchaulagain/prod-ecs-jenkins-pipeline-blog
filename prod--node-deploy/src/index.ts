@@ -32,20 +32,31 @@ const options = {
 const specs = swaggerJsdoc(options);
 app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(specs));
 
-app.use("/api/posts", postRoutes);
+let isDbInitialized = false;
 
 app.get("/health", (_, res) => {
-    res.status(200).json({ status: "ok" });
+    if (!isDbInitialized) {
+        return res.status(503).json({ status: "initializing", database: "connecting" });
+    }
+    res.status(200).json({ status: "ok", database: "connected" });
 });
 
+app.use("/api/posts", postRoutes);
+
+// Start server first so it can respond to health checks immediately
+app.listen(port, "0.0.0.0", () => {
+    console.log(`Server is running at http://localhost:${port}`);
+    console.log(`Swagger UI is available at http://localhost:${port}/api/docs`);
+});
+
+// Initialize DB in the background
 AppDataSource.initialize()
     .then(() => {
-        console.log("Data Source has been initialized!");
-        app.listen(port, "0.0.0.0", () => {
-            console.log(`Server is running at http://localhost:${port}`);
-            console.log(`Swagger UI is available at http://localhost:${port}/api-docs`);
-        });
+        isDbInitialized = true;
+        console.log("✅ Data Source has been initialized!");
     })
     .catch((err) => {
-        console.error("Error during Data Source initialization", err);
+        console.error("❌ Error during Data Source initialization", err);
+        // We keep the server running so ECS doesn't enter a crash loop immediately, 
+        // but health check will remain 503 if not initialized.
     });

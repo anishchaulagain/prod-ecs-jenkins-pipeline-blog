@@ -108,15 +108,42 @@ pipeline {
         stage('Deploy to ECS') {
             steps {
                 script {
-                    retry(2) {
-                        sh """
-                        aws ecs update-service \
-                            --cluster ${ECS_CLUSTER} \
-                            --service ${ECS_SERVICE} \
-                            --force-new-deployment \
-                            --region ${AWS_REGION}
-                        """
-                    }
+                    sh """
+                    # Get the current task definition JSON
+                    TASK_DEFINITION=\$(aws ecs describe-task-definition --task-definition ${JENKINS_CONTAINER_NAME} --region ${AWS_REGION})
+                    
+                    # Create a new task definition JSON with the updated image
+                    # We strip out metadata fields that register-task-definition doesn't accept
+                    NEW_CONTAINER_DEFS=\$(echo \$TASK_DEFINITION | jq '.taskDefinition.containerDefinitions | .[0].image = "${IMAGE_URI}"')
+                    EXECUTION_ROLE=\$(echo \$TASK_DEFINITION | jq -r '.taskDefinition.executionRoleArn // ""')
+                    TASK_ROLE=\$(echo \$TASK_DEFINITION | jq -r '.taskDefinition.taskRoleArn // ""')
+                    NETWORK_MODE=\$(echo \$TASK_DEFINITION | jq -r '.taskDefinition.networkMode // "bridge"')
+                    REQUIRES_COMPATIBILITIES=\$(echo \$TASK_DEFINITION | jq -r '.taskDefinition.requiresCompatibilities // []')
+                    CPU=\$(echo \$TASK_DEFINITION | jq -r '.taskDefinition.cpu // "256"')
+                    MEMORY=\$(echo \$TASK_DEFINITION | jq -r '.taskDefinition.memory // "512"')
+
+                    # Register the new task definition
+                    NEW_TASK_DEF_ARN=\$(aws ecs register-task-definition \
+                        --family ${JENKINS_CONTAINER_NAME} \
+                        --container-definitions "\$NEW_CONTAINER_DEFS" \
+                        --execution-role-arn "\$EXECUTION_ROLE" \
+                        --task-role-arn "\$TASK_ROLE" \
+                        --network-mode "\$NETWORK_MODE" \
+                        --requires-compatibilities "\$REQUIRES_COMPATIBILITIES" \
+                        --cpu "\$CPU" \
+                        --memory "\$MEMORY" \
+                        --region ${AWS_REGION} \
+                        --query 'taskDefinition.taskDefinitionArn' --output text)
+
+                    echo "🚀 Registered new Task Definition: \$NEW_TASK_DEF_ARN"
+
+                    # Update the service to use the new Task Definition
+                    aws ecs update-service \
+                        --cluster ${ECS_CLUSTER} \
+                        --service ${ECS_SERVICE} \
+                        --task-definition \$NEW_TASK_DEF_ARN \
+                        --region ${AWS_REGION}
+                    """
                 }
             }
         }
