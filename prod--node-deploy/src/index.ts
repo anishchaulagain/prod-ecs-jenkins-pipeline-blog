@@ -26,8 +26,8 @@ const options = {
         },
         servers: [
             {
-                url: process.env.API_URL || `http://localhost:${port}/api`,
-                description: "API Server"
+                url: "/api",
+                description: "API Server (Current Environment)"
             },
         ],
     },
