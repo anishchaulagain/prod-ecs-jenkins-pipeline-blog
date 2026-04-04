@@ -9,7 +9,11 @@ import swaggerJsdoc from "swagger-jsdoc";
 const app = express(); //express app
 const port = 8000;
 
-app.use(cors());
+app.use(cors({
+    origin: true, // Reflects the incoming origin, allowing valid requests
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']
+}));
 app.use(express.json());
 
 const options = {
